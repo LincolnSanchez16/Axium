@@ -30,8 +30,8 @@ final class AssistantRuntime: ObservableObject {
         aiIntentInterpreter: AIIntentInterpreter,
         assistantChatService: AssistantChatService,
         deterministicIntentRouter: IntentRouter,
-        intelligenceOrchestrator: IntelligenceOrchestrator = IntelligenceOrchestrator(),
-        cloudReasoningManager: CloudReasoningManager = CloudReasoningManager()
+        intelligenceOrchestrator: IntelligenceOrchestrator,
+        cloudReasoningManager: CloudReasoningManager
     ) {
         self.aiIntentInterpreter = aiIntentInterpreter
         self.assistantChatService = assistantChatService
@@ -48,7 +48,9 @@ final class AssistantRuntime: ObservableObject {
             return clarificationResult(input: input, decision: decision)
         case .escalateToCloud:
             return cloudPlaceholderResult(input: input, context: context, decision: decision)
-        case .immediateAction, .toolExecution, .saveMemory, .suggestProject:
+        case .saveMemory:
+            return memoryResult(input: input, decision: decision)
+        case .immediateAction, .toolExecution, .suggestProject:
             return await interpretCommand(input, context: context, decision: decision)
         case .hybrid:
             if decision.selectedTool == "AssistantChatService" {
@@ -129,6 +131,20 @@ final class AssistantRuntime: ObservableObject {
         return AssistantRuntimeResult(
             userMessage: input,
             action: .showConversationReply(response),
+            assistantResponse: response,
+            decision: decision
+        )
+    }
+
+    private func memoryResult(input: String, decision: AssistantDecision) -> AssistantRuntimeResult {
+        let response = decision.assistantResponse.isEmpty
+            ? "Got it. I’ll keep that as reviewable local context."
+            : decision.assistantResponse
+        chatSession.append(ChatMessage(role: .user, content: input))
+        chatSession.append(ChatMessage(role: .assistant, content: response))
+        return AssistantRuntimeResult(
+            userMessage: input,
+            action: .saveMemory(decision),
             assistantResponse: response,
             decision: decision
         )

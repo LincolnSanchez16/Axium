@@ -116,6 +116,38 @@ final class GlobalConversationMemoryStore: ObservableObject {
         snapshot.updatedAt = Date()
     }
 
+    func rememberPreferredName(_ name: String, sourceMessage: String) {
+        let cleanName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleanName.isEmpty == false else { return }
+
+        let candidate = ConversationMemoryCandidate(
+            sourceMessage: sourceMessage,
+            extractedMeaning: "User prefers to be called \(cleanName).",
+            confidence: 0.96,
+            category: .preferredName,
+            approved: true
+        )
+        mergeCandidates([candidate])
+        applyApprovedCandidate(candidate)
+        snapshot.updatedAt = Date()
+    }
+
+    func rememberPreference(_ preference: String, sourceMessage: String) {
+        let cleanPreference = preference.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleanPreference.isEmpty == false else { return }
+
+        let candidate = ConversationMemoryCandidate(
+            sourceMessage: sourceMessage,
+            extractedMeaning: "Prefers \(cleanPreference).",
+            confidence: 0.9,
+            category: .responsePreference,
+            approved: true
+        )
+        mergeCandidates([candidate])
+        applyApprovedCandidate(candidate)
+        snapshot.updatedAt = Date()
+    }
+
     func compactPromptSummary(maxLines: Int = 12) -> String {
         var lines = snapshot.userProfile.compactSummaryLines
 
@@ -169,6 +201,18 @@ final class GlobalConversationMemoryStore: ObservableObject {
 
         if lower.contains("direct technical honesty") || lower.contains("be direct") || lower.contains("tell me straight") {
             candidates.append(candidate(message, "Prefers direct technical honesty.", 0.88, .responsePreference))
+        }
+
+        if lower.contains("direct answers") {
+            candidates.append(candidate(message, "Prefers direct answers.", 0.9, .responsePreference))
+        }
+
+        if let statedPreference = extractStatedPreference(from: message) {
+            candidates.append(candidate(message, "Prefers \(statedPreference).", 0.88, .responsePreference))
+        }
+
+        if let statedDislike = extractStatedDislike(from: message) {
+            candidates.append(candidate(message, "Dislikes \(statedDislike).", 0.88, .dislikedBehavior))
         }
 
         if lower.contains("conversation-first") || lower.contains("conversation first") {
@@ -364,14 +408,14 @@ final class GlobalConversationMemoryStore: ObservableObject {
         let markers = ["my name is ", "call me ", "i'm ", "i am "]
         for marker in markers {
             guard let range = lower.range(of: marker) else { continue }
-            let suffix = message[range.upperBound...]
+            let suffix = lower[range.upperBound...]
             let candidate = suffix
                 .split { $0 == "." || $0 == "," || $0 == "\n" }
                 .first
                 .map(String.init)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if let candidate, candidate.count <= 40, candidate.split(separator: " ").count <= 3 {
-                return candidate
+                return candidate.capitalized
             }
         }
         return nil
@@ -381,12 +425,12 @@ final class GlobalConversationMemoryStore: ObservableObject {
         let lower = message.lowercased()
         for marker in [" means ", " = "] {
             guard let range = lower.range(of: marker) else { continue }
-            let rawTerm = message[..<range.lowerBound]
+            let rawTerm = lower[..<range.lowerBound]
                 .split { $0 == "." || $0 == "," || $0 == "\n" || $0 == ":" }
                 .last
                 .map(String.init)?
                 .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
-            let rawMeaning = message[range.upperBound...]
+            let rawMeaning = lower[range.upperBound...]
                 .split { $0 == "." || $0 == "," || $0 == "\n" }
                 .first
                 .map(String.init)?
@@ -403,6 +447,36 @@ final class GlobalConversationMemoryStore: ObservableObject {
             return (term, meaning)
         }
         return nil
+    }
+
+    private func extractStatedPreference(from message: String) -> String? {
+        let lower = message.lowercased()
+        let markers = ["remember that i like ", "remember that i prefer ", "i like ", "i prefer "]
+        for marker in markers {
+            guard let range = lower.range(of: marker) else { continue }
+            return extractShortValue(from: lower[range.upperBound...])
+        }
+        return nil
+    }
+
+    private func extractStatedDislike(from message: String) -> String? {
+        let lower = message.lowercased()
+        let markers = ["remember that i hate ", "remember that i don't like ", "remember that i dont like ", "i hate ", "i don't like ", "i dont like "]
+        for marker in markers {
+            guard let range = lower.range(of: marker) else { continue }
+            return extractShortValue(from: lower[range.upperBound...])
+        }
+        return nil
+    }
+
+    private func extractShortValue(from substring: Substring) -> String? {
+        let value = substring
+            .split { $0 == "." || $0 == "," || $0 == "\n" }
+            .first
+            .map(String.init)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let value, value.isEmpty == false else { return nil }
+        return String(value.prefix(90))
     }
 
     private func parseSlangMeaning(from meaning: String) -> (term: String, meaning: String)? {

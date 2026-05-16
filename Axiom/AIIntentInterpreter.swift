@@ -31,7 +31,8 @@ struct AIIntentInterpreter {
         Do not answer as a chat assistant. Do not perform long reasoning.
         Use persistent user context for routing preferences and slang only. Do not invent facts or memories.
         Choose one supported intent:
-        greeting, createProject, openProject, viewProjects, addNote, addTask, showNotes, showTasks, showMetrics, showFiles, showActivity, showIntegrations, saveToProject, addReminder, addCalendarItem, unknown.
+        greeting, createProject, openProject, viewProjects, addNote, addTask, showNotes, showTasks, showMetrics, showFiles, showActivity, showIntegrations, saveToProject, addReminder, addCalendarItem, rememberUserInfo, updateUserProfile, savePreference, unknown.
+        Use rememberUserInfo, updateUserProfile, or savePreference for personal identity, user preference, slang, or future-reference memory requests.
         Use shouldUseCloudAPI true only when the command needs broad external knowledge, web research, complex strategy, or long-form reasoning.
         Keep assistantResponse to one short UI sentence.
         JSON schema:

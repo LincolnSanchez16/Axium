@@ -24,6 +24,9 @@ struct AIIntentResult: Equatable, Codable {
         case saveToProject
         case addReminder
         case addCalendarItem
+        case rememberUserInfo
+        case updateUserProfile
+        case savePreference
         case unknown
 
         static func normalized(_ rawValue: String) -> Intent {
@@ -62,6 +65,12 @@ struct AIIntentResult: Equatable, Codable {
                 return .addReminder
             case "calendar", "event", "addcalendaritem":
                 return .addCalendarItem
+            case "remember", "rememberuserinfo", "memory", "saveuserinfo":
+                return .rememberUserInfo
+            case "updateuserprofile", "profile", "username", "preferredname":
+                return .updateUserProfile
+            case "savepreference", "preference", "rememberpreference":
+                return .savePreference
             default:
                 return .unknown
             }
@@ -152,6 +161,8 @@ struct AIIntentResult: Equatable, Codable {
             return .viewActivity
         case .showIntegrations:
             return .connectIntegration
+        case .rememberUserInfo, .updateUserProfile, .savePreference:
+            return .focusConversation
         case .saveToProject, .addReminder, .addCalendarItem, .unknown:
             return .unknown
         }

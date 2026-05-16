@@ -17,6 +17,7 @@ struct AssistantRuntimeResult {
 enum AssistantRuntimeAction {
     case routeAIIntent(AIIntentResult)
     case routeDeterministicIntent(AssistantIntent, fallbackNotice: String?)
+    case saveMemory(AssistantDecision)
     case showConversationReply(String)
     case showConversationError(String)
 }

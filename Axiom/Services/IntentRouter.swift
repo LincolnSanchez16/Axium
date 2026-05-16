@@ -41,6 +41,23 @@ struct IntentRouter {
             return AssistantIntent(kind: .viewNotes, confidence: 0.88)
         }
 
+        if containsAny(normalizedInput, phrases: [
+            "my name is",
+            "call me",
+            "remember my name",
+            "store my name",
+            "remember that",
+            "remember this",
+            "for future reference",
+            "i like",
+            "i prefer",
+            "i hate",
+            "i don't like",
+            "i dont like"
+        ]) {
+            return AssistantIntent(kind: .focusConversation, confidence: 0.9)
+        }
+
         if containsAny(normalizedInput, phrases: ["show files", "view files", "open files", "files", "file browser"]) {
             return AssistantIntent(kind: .viewFiles, confidence: 0.88)
         }

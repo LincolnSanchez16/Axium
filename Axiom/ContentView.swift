@@ -31,6 +31,7 @@ struct ContentView: View {
     @StateObject private var globalFileStore = GlobalFileStore()
     @StateObject private var globalConversationMemoryStore = GlobalConversationMemoryStore()
     @StateObject private var assistantRuntime = AssistantRuntime()
+    @StateObject private var voiceSessionManager = VoiceSessionManager()
     @State private var appMode: AppMode = .orbOnlyLaunch
     @State private var assistantState: AssistantState = .idle
     @State private var prompt = ""
@@ -50,7 +51,7 @@ struct ContentView: View {
                 switch appMode {
                 case .orbOnlyLaunch:
                     OrbOnlyLaunchView(
-                        assistantState: assistantState,
+                        assistantState: visibleAssistantState,
                         onWake: wakeAxium
                     )
                     .transition(.opacity.combined(with: .scale(scale: 0.98)))
@@ -64,7 +65,7 @@ struct ContentView: View {
                         messages: flowManager.messages,
                         turn: currentTurn,
                         prompt: $prompt,
-                        assistantState: assistantState,
+                        assistantState: visibleAssistantState,
                         onSubmit: handlePromptSubmit,
                         onSuggestionSelected: handleSuggestedReply,
                         onCreateProject: { createBlankProject() },
@@ -75,6 +76,28 @@ struct ContentView: View {
                     .transition(.opacity.combined(with: .scale(scale: 0.985)))
                 }
             }
+
+            if appMode == .projectFocus && (voiceSessionManager.isActive || voiceSessionManager.state == .error) {
+                VStack {
+                    HStack {
+                        Spacer()
+                        VoiceStatusIndicatorView(
+                            state: voiceSessionManager.state,
+                            statusText: voiceSessionManager.statusText,
+                            transcript: voiceSessionManager.liveTranscript,
+                            isMuted: voiceSessionManager.isMuted,
+                            onToggleMute: { voiceSessionManager.toggleMute() },
+                            onStop: { voiceSessionManager.stopSession() },
+                            onRestart: { voiceSessionManager.restartListening() }
+                        )
+                        .padding(.top, 24)
+                        .padding(.trailing, 28)
+                    }
+                    Spacer()
+                }
+                .transition(.opacity.combined(with: .move(edge: .top)))
+                .zIndex(80)
+            }
         }
         .frame(minWidth: 960, minHeight: 640)
         .preferredColorScheme(.dark)
@@ -84,6 +107,23 @@ struct ContentView: View {
             let storedState = AxiumPersistenceController().load(AxiumAppState.self, from: .appState, fallback: AxiumAppState())
             appState = storedState
             currentProjectId = storedState.selectedProjectId
+        }
+    }
+
+    private var visibleAssistantState: AssistantState {
+        guard voiceSessionManager.isActive || voiceSessionManager.state == .error else {
+            return assistantState
+        }
+
+        switch voiceSessionManager.state {
+        case .inactive, .error:
+            return assistantState
+        case .requestingPermission, .transcribing, .thinking, .interrupted:
+            return .thinking
+        case .listening:
+            return .listening
+        case .speaking:
+            return .responding
         }
     }
 
@@ -101,6 +141,7 @@ struct ContentView: View {
     private func wakeAxium() {
         if let project = projectStore.project(id: currentProjectId) {
             openProject(project)
+            startVoiceSessionIfNeeded()
             return
         }
 
@@ -109,9 +150,29 @@ struct ContentView: View {
             assistantState = .idle
         }
 
-        // Future voice greeting hook:
-        // When audio is enabled, Axium can greet here with "Hello, welcome to Axium."
-        // No speech synthesis or microphone logic is connected in this local UI pass.
+        startVoiceSessionIfNeeded()
+
+        // Future wake-word hook: for now, clicking the landing orb explicitly starts voice mode.
+    }
+
+    private func startVoiceSessionIfNeeded() {
+        guard voiceSessionManager.isActive == false else {
+            voiceSessionManager.restartListening()
+            return
+        }
+
+        Task {
+            await voiceSessionManager.startSession { transcript in
+                Task { await handleVoiceTranscript(transcript) }
+            }
+        }
+    }
+
+    private func handleVoiceTranscript(_ transcript: String) async {
+        let cleanTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleanTranscript.isEmpty == false else { return }
+        prompt = ""
+        await handleUserMessage(cleanTranscript)
     }
 
     private func handleUserMessage(_ cleanPrompt: String) async {
@@ -140,11 +201,44 @@ struct ContentView: View {
             routeAIIntent(aiResult, userMessage: result.userMessage)
         case .routeDeterministicIntent(let intent, let fallbackNotice):
             routeDeterministicIntent(result.userMessage, intent: intent, fallbackNotice: fallbackNotice)
+        case .saveMemory(let decision):
+            handleMemoryDecision(result.userMessage, response: result.assistantResponse ?? decision.assistantResponse, decision: decision)
         case .showConversationReply(let response), .showConversationError(let response):
             flowManager.appendAssistantMessage(response)
             globalContextStore.updateWorkingContext(with: ConversationMessage(speaker: .assistant, text: response))
             showChatTurn(userMessage: result.userMessage, response: response)
         }
+    }
+
+    private func handleMemoryDecision(_ userMessage: String, response: String, decision: AssistantDecision) {
+        switch decision.extractedContext["memoryType"] {
+        case "preferredName":
+            if let name = decision.extractedContext["preferredName"] {
+                globalConversationMemoryStore.rememberPreferredName(name, sourceMessage: userMessage)
+            }
+        case "preference":
+            if let preference = decision.extractedContext["preference"] {
+                globalConversationMemoryStore.rememberPreference(preference, sourceMessage: userMessage)
+            }
+        default:
+            globalConversationMemoryStore.observeUserMessage(
+                userMessage,
+                activeProjectName: projectStore.project(id: currentProjectId)?.name,
+                availableProjectNames: projectStore.listProjects().map(\.name)
+            )
+        }
+
+        flowManager.appendAssistantMessage(response)
+        globalContextStore.updateWorkingContext(with: ConversationMessage(speaker: .assistant, text: response))
+        updateTurn(
+            userMessage: userMessage,
+            intent: AssistantIntent(kind: .focusConversation, confidence: decision.confidence),
+            response: response,
+            modules: [],
+            focusedProject: nil,
+            focusedProjectId: currentProjectId,
+            suggestions: []
+        )
     }
 
     private func observeUserMemoryIfNeeded(_ message: String, decision: AssistantDecision) {
@@ -230,6 +324,8 @@ struct ContentView: View {
             saveReminderFromAI(result, userMessage: userMessage)
         case .addCalendarItem:
             saveCalendarItemFromAI(result, userMessage: userMessage)
+        case .rememberUserInfo, .updateUserProfile, .savePreference:
+            saveMemoryFromAI(result, userMessage: userMessage)
         case .greeting, .viewProjects, .showNotes, .showTasks, .showMetrics, .showFiles, .showActivity, .showIntegrations:
             routeIntentResult(intent, prompt: userMessage, responseOverride: result.assistantResponse)
         case .unknown:
@@ -239,6 +335,26 @@ struct ContentView: View {
                 response: "I need one more detail before I route that."
             )
         }
+    }
+
+    private func saveMemoryFromAI(_ result: AIIntentResult, userMessage: String) {
+        let response = result.assistantResponse.isEmpty
+            ? "Got it. I’ll keep that as reviewable local context."
+            : result.assistantResponse
+        handleMemoryDecision(
+            userMessage,
+            response: response,
+            decision: AssistantDecision(
+                reasoningLevel: .lightweight,
+                responseStrategy: .saveMemory,
+                selectedTool: "AIIntentInterpreter",
+                confidence: result.confidence,
+                shouldSaveMemory: true,
+                suggestedModules: ["memory"],
+                assistantResponse: response,
+                extractedContext: ["memoryType": "general"]
+            )
+        )
     }
 
     private func routeDeterministicIntent(_ cleanPrompt: String, intent: AssistantIntent, fallbackNotice: String? = nil) {
@@ -586,6 +702,7 @@ struct ContentView: View {
         }
         persistAppState(selectedProjectId: resolvedProjectId, focusMode: turn.focusedMode)
         globalConversationMemoryStore.observeAssistantMessage(response)
+        voiceSessionManager.speak(response)
 
         // Runtime decides command vs chat. ContentView still applies module/project UI effects.
     }
@@ -1286,6 +1403,114 @@ struct CommandInputView: View {
             return "sparkle.magnifyingglass"
         case .responding:
             return "sparkles"
+        }
+    }
+}
+
+struct VoiceStatusIndicatorView: View {
+    let state: VoiceSessionState
+    let statusText: String
+    let transcript: String
+    let isMuted: Bool
+    let onToggleMute: () -> Void
+    let onStop: () -> Void
+    let onRestart: () -> Void
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            HStack(spacing: 8) {
+                Label(statusText, systemImage: systemImage)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(foregroundColor)
+
+                Button(action: onToggleMute) {
+                    Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .help(isMuted ? "Unmute voice session" : "Mute voice session")
+
+                Button(action: onRestart) {
+                    Image(systemName: "arrow.clockwise")
+                        .font(.system(size: 11, weight: .semibold))
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .help("Restart listening")
+
+                Button(action: onStop) {
+                    Image(systemName: "stop.fill")
+                        .font(.system(size: 10, weight: .semibold))
+                        .frame(width: 24, height: 24)
+                }
+                .buttonStyle(.plain)
+                .help("Stop listening")
+            }
+
+            if transcript.isEmpty == false {
+                Text(transcript)
+                    .font(.system(size: 12, weight: .medium, design: .rounded))
+                    .foregroundStyle(AxiomColor.textSecondary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.trailing)
+                    .frame(maxWidth: 360, alignment: .trailing)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(AxiomColor.commandSurface.opacity(0.82))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(borderColor, lineWidth: 1)
+                )
+        )
+        .foregroundStyle(AxiomColor.textSecondary)
+        .shadow(color: .black.opacity(0.22), radius: 18, x: 0, y: 10)
+    }
+
+    private var systemImage: String {
+        switch state {
+        case .inactive:
+            return "mic.slash"
+        case .requestingPermission:
+            return "lock"
+        case .listening:
+            return "mic"
+        case .transcribing:
+            return "waveform"
+        case .thinking:
+            return "sparkle.magnifyingglass"
+        case .speaking:
+            return "speaker.wave.2"
+        case .interrupted:
+            return "hand.raised"
+        case .error:
+            return "exclamationmark.triangle"
+        }
+    }
+
+    private var foregroundColor: Color {
+        switch state {
+        case .error:
+            return .orange
+        case .listening, .transcribing, .speaking:
+            return AxiomColor.accentText
+        case .inactive, .requestingPermission, .thinking, .interrupted:
+            return AxiomColor.textSecondary
+        }
+    }
+
+    private var borderColor: Color {
+        switch state {
+        case .error:
+            return .orange.opacity(0.28)
+        case .listening, .transcribing, .speaking:
+            return AxiomColor.accent.opacity(0.24)
+        case .inactive, .requestingPermission, .thinking, .interrupted:
+            return .white.opacity(0.09)
         }
     }
 }
