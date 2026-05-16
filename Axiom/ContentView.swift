@@ -29,17 +29,16 @@ struct ContentView: View {
     @StateObject private var memoryStore = MemoryStore()
     @StateObject private var globalContextStore = GlobalContextStore()
     @StateObject private var globalFileStore = GlobalFileStore()
+    @StateObject private var globalConversationMemoryStore = GlobalConversationMemoryStore()
+    @StateObject private var assistantRuntime = AssistantRuntime()
     @State private var appMode: AppMode = .orbOnlyLaunch
     @State private var assistantState: AssistantState = .idle
     @State private var prompt = ""
     @State private var currentTurn: AssistantTurn = .landing
     @State private var currentProjectId: UUID?
     @State private var appState = AxiumAppState()
-    @State private var chatSession = ConversationSession()
 
-    private let intentRouter = IntentRouter()
-    private let aiIntentInterpreter = AIIntentInterpreter()
-    private let assistantChatService = AssistantChatService()
+    private let contextBuilder = AssistantContextBuilder()
     private let briefingEngine = AssistantBriefingEngine()
     private let contextRouter = ContextRouter()
 
@@ -128,121 +127,52 @@ struct ContentView: View {
             assistantState = .thinking
         }
 
-        switch classifyInput(cleanPrompt) {
-        case .command:
-            do {
-                let aiResult = try await aiIntentInterpreter.interpret(command: cleanPrompt, context: aiIntentContext())
-                routeAIIntent(aiResult, userMessage: cleanPrompt)
-            } catch {
-                routeDeterministicIntent(
-                    cleanPrompt,
-                    fallbackNotice: "Local interpreter unavailable, using deterministic routing."
-                )
-            }
-        case .conversation:
-            await routeConversationalMessage(cleanPrompt)
-        }
+        let result = await assistantRuntime.handleUserInput(cleanPrompt, context: assistantContext())
+        observeUserMemoryIfNeeded(cleanPrompt, decision: result.decision)
+        applyRuntimeResult(result)
     }
 
-    private enum InputRoute {
-        case command
-        case conversation
-    }
+    private func applyRuntimeResult(_ result: AssistantRuntimeResult) {
+        applyAssistantState(for: result.decision)
 
-    private func classifyInput(_ input: String) -> InputRoute {
-        let normalized = routingText(from: input)
-        guard normalized.isEmpty == false else { return .conversation }
-
-        let conversationalPhrases = [
-            "what do you think",
-            "what are your thoughts",
-            "how do you feel",
-            "help me think",
-            "talk through",
-            "brainstorm",
-            "explain",
-            "why do",
-            "why is",
-            "should i",
-            "can you help me understand"
-        ]
-        let commandPhrases = [
-            "what needs work",
-            "show projects",
-            "view projects",
-            "list projects",
-            "project library",
-            "open notes",
-            "show notes",
-            "view notes",
-            "open tasks",
-            "show tasks",
-            "view tasks",
-            "open files",
-            "show files",
-            "view files",
-            "show metrics",
-            "show activity",
-            "show integrations",
-            "create project",
-            "new project",
-            "add note",
-            "add task",
-            "save this",
-            "remind me",
-            "add reminder",
-            "calendar"
-        ]
-
-        if commandPhrases.contains(where: { normalized.contains($0) }) {
-            return .command
-        }
-
-        if conversationalPhrases.contains(where: { normalized.contains($0) }) {
-            return .conversation
-        }
-
-        let commandPrefixes = ["open ", "show ", "view ", "create ", "add ", "save ", "list ", "connect ", "remind ", "schedule "]
-        if commandPrefixes.contains(where: { normalized.hasPrefix($0) }) {
-            return .command
-        }
-
-        if normalized.hasSuffix("?") {
-            return .conversation
-        }
-
-        return .conversation
-    }
-
-    private func routingText(from input: String) -> String {
-        var text = input.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let salutations = ["hey axium,", "hey axium", "hi axium,", "hi axium", "axium,", "axium"]
-        for salutation in salutations where text.hasPrefix(salutation) {
-            text.removeFirst(salutation.count)
-            return text.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return text
-    }
-
-    private func routeConversationalMessage(_ cleanPrompt: String) async {
-        chatSession.append(ChatMessage(role: .user, content: cleanPrompt))
-
-        do {
-            let response = try await assistantChatService.reply(to: chatSession.messages, context: aiIntentContext())
-            let reply = response.isEmpty ? "I’m here, but I didn’t get a usable local response." : response
-            chatSession.append(ChatMessage(role: .assistant, content: reply))
-            flowManager.appendAssistantMessage(reply)
-            globalContextStore.updateWorkingContext(with: ConversationMessage(speaker: .assistant, text: reply))
-            showChatTurn(userMessage: cleanPrompt, response: reply)
-        } catch {
-            let response = "I couldn’t reach the local chat runtime. Ollama may be offline, so I kept your message in this session."
-            chatSession.append(ChatMessage(role: .assistant, content: response))
+        switch result.action {
+        case .routeAIIntent(let aiResult):
+            routeAIIntent(aiResult, userMessage: result.userMessage)
+        case .routeDeterministicIntent(let intent, let fallbackNotice):
+            routeDeterministicIntent(result.userMessage, intent: intent, fallbackNotice: fallbackNotice)
+        case .showConversationReply(let response), .showConversationError(let response):
             flowManager.appendAssistantMessage(response)
             globalContextStore.updateWorkingContext(with: ConversationMessage(speaker: .assistant, text: response))
-            showChatTurn(userMessage: cleanPrompt, response: response)
+            showChatTurn(userMessage: result.userMessage, response: response)
         }
     }
 
+    private func observeUserMemoryIfNeeded(_ message: String, decision: AssistantDecision) {
+        guard decision.shouldSaveMemory else { return }
+
+        globalConversationMemoryStore.observeUserMessage(
+            message,
+            activeProjectName: projectStore.project(id: currentProjectId)?.name,
+            availableProjectNames: projectStore.listProjects().map(\.name)
+        )
+    }
+
+    private func applyAssistantState(for decision: AssistantDecision) {
+        // This is the first architecture hook for multi-speed orb behavior.
+        // Later the orb can map .deep and .cloudRequired to longer progress states.
+        withAnimation(.easeInOut(duration: 0.18)) {
+            switch decision.reasoningLevel {
+            case .instant:
+                assistantState = .responding
+            case .lightweight, .contextual, .deep, .cloudRequired:
+                assistantState = .thinking
+            }
+        }
+    }
+
+    // TODO: Move these app-effect handlers into focused action executors once the runtime
+    // owns project/global mutations directly. ContentView applies them for now because they
+    // update SwiftUI state, stores, and module turns in one place.
     private func showChatTurn(userMessage: String, response: String) {
         let activeProject = projectStore.project(id: currentProjectId)
         updateTurn(
@@ -311,8 +241,7 @@ struct ContentView: View {
         }
     }
 
-    private func routeDeterministicIntent(_ cleanPrompt: String, fallbackNotice: String? = nil) {
-        let intent = intentRouter.route(cleanPrompt)
+    private func routeDeterministicIntent(_ cleanPrompt: String, intent: AssistantIntent, fallbackNotice: String? = nil) {
         trackRelevantMemories(for: cleanPrompt, intent: intent)
 
         if handleGlobalContextRoute(contextRouter.route(cleanPrompt, currentProjectId: currentProjectId, projectStore: projectStore), prompt: cleanPrompt, intent: intent, fallbackNotice: fallbackNotice) {
@@ -548,23 +477,14 @@ struct ContentView: View {
         return trimmed
     }
 
-    private func aiIntentContext() -> AIIntentContext {
-        let activeProject = projectStore.project(id: currentProjectId)
-        let visibleModules = Array(Set(
-            currentTurn.modules.map(\.kind.rawValue)
-                + appState.visibleModuleIds
-                + (currentTurn.focusedMode == .conversation ? [] : [currentTurn.focusedMode.rawValue])
-        )).sorted()
-        let pinnedModules = Array(Set(appState.pinnedModuleIds)).sorted()
-        let projectNames = projectStore.listProjects().prefix(12).map(\.name)
-        let globalSummary = "\(globalContextStore.notes.count) notes, \(globalContextStore.tasks.count) tasks, \(globalContextStore.reminders.count) reminders, \(globalContextStore.calendarItems.count) calendar items."
-
-        return AIIntentContext(
-            activeProjectName: activeProject?.name,
-            visibleModules: visibleModules,
-            pinnedModules: pinnedModules,
-            availableProjects: Array(projectNames),
-            globalContextSummary: globalSummary
+    private func assistantContext() -> AIIntentContext {
+        contextBuilder.build(
+            projectStore: projectStore,
+            globalContextStore: globalContextStore,
+            globalConversationMemoryStore: globalConversationMemoryStore,
+            currentProjectId: currentProjectId,
+            currentTurn: currentTurn,
+            appState: appState
         )
     }
 
@@ -665,9 +585,9 @@ struct ContentView: View {
             assistantState = .responding
         }
         persistAppState(selectedProjectId: resolvedProjectId, focusMode: turn.focusedMode)
+        globalConversationMemoryStore.observeAssistantMessage(response)
 
-        // Local Ollama interprets command intent only. Long chat, cloud reasoning, streaming,
-        // and broad tool execution stay outside this routing layer for now.
+        // Runtime decides command vs chat. ContentView still applies module/project UI effects.
     }
 
     private func returnToLanding() {

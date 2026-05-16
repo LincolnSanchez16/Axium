@@ -13,6 +13,8 @@ final class AxiumPersistenceController: @unchecked Sendable {
         case memory = "memory.json"
         case globalContext = "globalContext.json"
         case globalFiles = "globalFiles.json"
+        case userProfile = "userProfile.json"
+        case conversationMemory = "conversationMemory.json"
         case appState = "appState.json"
         case moduleLayout = "moduleLayout.json"
         case projectWorkspaceStashes = "projectWorkspaceStashes.json"

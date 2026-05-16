@@ -29,6 +29,7 @@ struct AIIntentInterpreter {
         You are Axium's lightweight local intent interpreter.
         Return ONLY valid JSON. No markdown. No prose outside JSON.
         Do not answer as a chat assistant. Do not perform long reasoning.
+        Use persistent user context for routing preferences and slang only. Do not invent facts or memories.
         Choose one supported intent:
         greeting, createProject, openProject, viewProjects, addNote, addTask, showNotes, showTasks, showMetrics, showFiles, showActivity, showIntegrations, saveToProject, addReminder, addCalendarItem, unknown.
         Use shouldUseCloudAPI true only when the command needs broad external knowledge, web research, complex strategy, or long-form reasoning.
@@ -59,6 +60,9 @@ struct AIIntentInterpreter {
         Pinned modules: \(context.pinnedModules.isEmpty ? "none" : context.pinnedModules.joined(separator: ", "))
         Available projects: \(context.availableProjects.isEmpty ? "none" : context.availableProjects.joined(separator: ", "))
         Global context summary: \(context.globalContextSummary)
+
+        Persistent user context:
+        \(context.userProfileSummary)
 
         Return ONLY valid JSON for the command.
         """
@@ -94,6 +98,7 @@ struct AIIntentContext: Equatable {
     let pinnedModules: [String]
     let availableProjects: [String]
     let globalContextSummary: String
+    let userProfileSummary: String
 }
 
 enum AIIntentInterpreterError: LocalizedError {
