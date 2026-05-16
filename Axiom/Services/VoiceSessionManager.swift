@@ -24,28 +24,42 @@ final class VoiceSessionManager: ObservableObject {
     @Published private(set) var state: VoiceSessionState = .inactive
     @Published private(set) var liveTranscript = ""
     @Published private(set) var errorMessage: String?
-    @Published var isMuted = false
+    @Published private(set) var settings: VoiceSettings {
+        didSet { persistSettingsIfNeeded() }
+    }
 
     private let speechRecognitionProvider: any SpeechRecognitionProvider
     private let speechSynthesisService: SpeechSynthesisService
+    private let persistence: AxiumPersistenceController
     private var onFinalTranscript: ((String) -> Void)?
     private var lastSpokenText = ""
     private var lastSubmittedTranscript = ""
     private var isSessionActive = false
     private var isHandlingBargeIn = false
+    private var recoveryAttempts = 0
+    private var isPersistenceReady = false
 
     init() {
+        let persistence = AxiumPersistenceController()
+        let loadedSettings = persistence.load(VoiceSettings.self, from: .voiceSettings, fallback: VoiceSettings())
+        self.persistence = persistence
+        self.settings = loadedSettings
         self.speechRecognitionProvider = AppleSpeechRecognitionProvider()
-        self.speechSynthesisService = SpeechSynthesisService()
+        self.speechSynthesisService = SpeechSynthesisService(preferredProviderType: loadedSettings.ttsProviderType)
+        isPersistenceReady = true
         configureCallbacks()
     }
 
     init(
         speechRecognitionProvider: any SpeechRecognitionProvider,
-        speechSynthesisService: SpeechSynthesisService
+        speechSynthesisService: SpeechSynthesisService,
+        persistence: AxiumPersistenceController
     ) {
+        self.persistence = persistence
+        self.settings = persistence.load(VoiceSettings.self, from: .voiceSettings, fallback: VoiceSettings())
         self.speechRecognitionProvider = speechRecognitionProvider
         self.speechSynthesisService = speechSynthesisService
+        isPersistenceReady = true
         configureCallbacks()
     }
 
@@ -53,12 +67,16 @@ final class VoiceSessionManager: ObservableObject {
         isSessionActive
     }
 
+    var isMuted: Bool {
+        settings.isSessionMuted
+    }
+
     var statusText: String {
-        if isMuted { return "Voice muted" }
+        if settings.isSessionMuted { return "Voice muted" }
 
         switch state {
         case .inactive:
-            return "Voice inactive"
+            return settings.selectedMode == .passive ? "Passive" : "Voice inactive"
         case .requestingPermission:
             return "Permission needed"
         case .listening:
@@ -76,12 +94,16 @@ final class VoiceSessionManager: ObservableObject {
         }
     }
 
-    func startSession(onFinalTranscript: @escaping (String) -> Void) async {
+    func startSession(onFinalTranscript: @escaping (String) -> Void, manualActivation: Bool = false) async {
         self.onFinalTranscript = onFinalTranscript
         isSessionActive = true
-        isMuted = false
         errorMessage = nil
         state = .requestingPermission
+
+        if settings.isSessionMuted || (settings.selectedMode == .passive && manualActivation == false) {
+            state = .inactive
+            return
+        }
 
         do {
             try await speechRecognitionProvider.requestPermissions()
@@ -104,10 +126,20 @@ final class VoiceSessionManager: ObservableObject {
     }
 
     func restartListening() {
-        guard isSessionActive, isMuted == false else { return }
+        restartListening(manualActivation: true)
+    }
+
+    func restartListening(manualActivation: Bool) {
+        guard isSessionActive, settings.isSessionMuted == false else { return }
+        guard settings.selectedMode != .passive || manualActivation else {
+            state = .inactive
+            return
+        }
+
         speechSynthesisService.stopSpeaking()
         do {
             try startListening()
+            recoveryAttempts = 0
         } catch {
             state = .error
             errorMessage = error.localizedDescription
@@ -115,27 +147,76 @@ final class VoiceSessionManager: ObservableObject {
     }
 
     func toggleMute() {
-        isMuted.toggle()
-        if isMuted {
+        settings.isSessionMuted.toggle()
+        if settings.isSessionMuted {
             speechSynthesisService.stopSpeaking()
             speechRecognitionProvider.stopListening()
             state = .inactive
         } else if isSessionActive {
-            restartListening()
+            restartListening(manualActivation: settings.selectedMode != .passive)
         }
     }
 
+    func updateMode(_ mode: VoiceMode) {
+        settings.selectedMode = mode
+        guard isSessionActive, settings.isSessionMuted == false else { return }
+
+        switch mode {
+        case .passive:
+            speechRecognitionProvider.stopListening()
+            state = .inactive
+        case .interactive, .ambient:
+            restartListening(manualActivation: true)
+        }
+    }
+
+    func setInterruptionEnabled(_ isEnabled: Bool) {
+        settings.isInterruptionEnabled = isEnabled
+    }
+
+    func setLiveTranscriptVisible(_ isVisible: Bool) {
+        settings.showsLiveTranscript = isVisible
+        if isVisible == false {
+            liveTranscript = ""
+        }
+    }
+
+    func setAutoSpeakResponses(_ isEnabled: Bool) {
+        settings.autoSpeaksResponses = isEnabled
+    }
+
+    func setSpeechOutputMuted(_ isMuted: Bool) {
+        settings.isSpeechOutputMuted = isMuted
+        if isMuted {
+            speechSynthesisService.stopSpeaking()
+        }
+    }
+
+    func updateSensitivity(_ sensitivity: VoiceSensitivity) {
+        settings.sensitivity = sensitivity
+    }
+
+    func updateTTSProviderType(_ providerType: TTSProviderType) {
+        settings.ttsProviderType = providerType
+        speechSynthesisService.updatePreferredProvider(providerType)
+    }
+
     func markThinking() {
-        guard isSessionActive, isMuted == false else { return }
+        guard isSessionActive, settings.isSessionMuted == false else { return }
         state = .thinking
     }
 
     func speak(_ response: String) {
-        guard isSessionActive, isMuted == false else { return }
+        guard isSessionActive, settings.isSessionMuted == false else { return }
 
         let cleanResponse = response.trimmingCharacters(in: .whitespacesAndNewlines)
         guard cleanResponse.isEmpty == false else {
-            restartListening()
+            resumeListeningAfterResponse()
+            return
+        }
+
+        guard settings.autoSpeaksResponses, settings.isSpeechOutputMuted == false else {
+            resumeListeningAfterResponse()
             return
         }
 
@@ -143,10 +224,14 @@ final class VoiceSessionManager: ObservableObject {
         liveTranscript = ""
         isHandlingBargeIn = false
 
-        do {
-            try startListening(setState: false)
-        } catch {
-            // Speech can still be spoken if barge-in listening is unavailable.
+        if settings.isInterruptionEnabled {
+            do {
+                try startListening(setState: false)
+            } catch {
+                // Speech can still be spoken if barge-in listening is unavailable.
+            }
+        } else {
+            speechRecognitionProvider.stopListening()
         }
 
         state = .speaking
@@ -166,18 +251,19 @@ final class VoiceSessionManager: ObservableObject {
             guard let self, self.isSessionActive else { return }
             self.state = .error
             self.errorMessage = message
+            self.recoverListeningIfNeeded()
         }
 
         speechSynthesisService.onSpeechFinished = { [weak self] in
-            guard let self, self.isSessionActive, self.isMuted == false else { return }
+            guard let self, self.isSessionActive, self.settings.isSessionMuted == false else { return }
             if self.isHandlingBargeIn {
                 return
             }
-            self.restartListening()
+            self.resumeListeningAfterResponse()
         }
 
         speechSynthesisService.onSpeechCancelled = { [weak self] in
-            guard let self, self.isSessionActive, self.isMuted == false else { return }
+            guard let self, self.isSessionActive, self.settings.isSessionMuted == false else { return }
             if self.isHandlingBargeIn {
                 self.state = .interrupted
             }
@@ -193,11 +279,12 @@ final class VoiceSessionManager: ObservableObject {
     }
 
     private func handlePartialTranscript(_ transcript: String) {
-        guard isSessionActive, isMuted == false else { return }
+        guard isSessionActive, settings.isSessionMuted == false else { return }
         let cleanTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard cleanTranscript.isEmpty == false else { return }
 
         if state == .speaking {
+            guard settings.isInterruptionEnabled else { return }
             guard isLikelySelfSpeech(cleanTranscript) == false else { return }
             isHandlingBargeIn = true
             speechSynthesisService.stopSpeaking()
@@ -211,7 +298,7 @@ final class VoiceSessionManager: ObservableObject {
     }
 
     private func handleFinalTranscript(_ transcript: String) {
-        guard isSessionActive, isMuted == false else { return }
+        guard isSessionActive, settings.isSessionMuted == false else { return }
         let cleanTranscript = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard cleanTranscript.isEmpty == false else { return }
 
@@ -230,6 +317,42 @@ final class VoiceSessionManager: ObservableObject {
         speechSynthesisService.stopSpeaking()
         state = .thinking
         onFinalTranscript?(cleanTranscript)
+    }
+
+    private func resumeListeningAfterResponse() {
+        switch settings.selectedMode {
+        case .passive:
+            speechRecognitionProvider.stopListening()
+            state = .inactive
+        case .interactive, .ambient:
+            restartListening(manualActivation: false)
+        }
+    }
+
+    private func recoverListeningIfNeeded() {
+        guard settings.selectedMode == .ambient,
+              settings.isSessionMuted == false,
+              isSessionActive,
+              recoveryAttempts < 2
+        else { return }
+
+        recoveryAttempts += 1
+        Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: 700_000_000)
+            } catch {
+                return
+            }
+
+            await MainActor.run {
+                self?.restartListening(manualActivation: false)
+            }
+        }
+    }
+
+    private func persistSettingsIfNeeded() {
+        guard isPersistenceReady else { return }
+        persistence.save(settings, to: .voiceSettings)
     }
 
     private func isLikelySelfSpeech(_ transcript: String) -> Bool {

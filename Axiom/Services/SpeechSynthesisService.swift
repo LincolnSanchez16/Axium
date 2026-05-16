@@ -10,7 +10,7 @@ import Combine
 import Foundation
 
 @MainActor
-final class SpeechSynthesisService: NSObject, ObservableObject, AVSpeechSynthesizerDelegate {
+final class AppleSpeechSynthesisProvider: NSObject, ObservableObject, AVSpeechSynthesizerDelegate, SpeechSynthesisProvider {
     struct VoiceTuning {
         var rate: Float = 0.44
         var pitchMultiplier: Float = 0.97
@@ -50,7 +50,7 @@ final class SpeechSynthesisService: NSObject, ObservableObject, AVSpeechSynthesi
     }
 
     func stopSpeaking() {
-        guard synthesizer.isSpeaking else { return }
+        guard isSpeaking else { return }
         synthesizer.stopSpeaking(at: .immediate)
     }
 
@@ -153,5 +153,123 @@ final class SpeechSynthesisService: NSObject, ObservableObject, AVSpeechSynthesi
             isSpeaking = false
             onSpeechCancelled?()
         }
+    }
+}
+
+@MainActor
+final class SpeechSynthesisService: ObservableObject, SpeechSynthesisProvider {
+    @Published private(set) var isSpeaking = false
+
+    var onSpeechStarted: (() -> Void)?
+    var onSpeechFinished: (() -> Void)?
+    var onSpeechCancelled: (() -> Void)?
+
+    private let appleProvider: AppleSpeechSynthesisProvider
+    private let piperProvider: PiperSpeechSynthesisProvider
+    private var preferredProviderType: TTSProviderType
+    private var activeProvider: (any SpeechSynthesisProvider)?
+    private var pendingFallbackText = ""
+
+    init(preferredProviderType: TTSProviderType = .piper) {
+        self.preferredProviderType = preferredProviderType
+        self.appleProvider = AppleSpeechSynthesisProvider()
+        self.piperProvider = PiperSpeechSynthesisProvider()
+        configureProviderCallbacks()
+    }
+
+    init(
+        preferredProviderType: TTSProviderType,
+        appleProvider: AppleSpeechSynthesisProvider,
+        piperProvider: PiperSpeechSynthesisProvider
+    ) {
+        self.preferredProviderType = preferredProviderType
+        self.appleProvider = appleProvider
+        self.piperProvider = piperProvider
+        configureProviderCallbacks()
+    }
+
+    func updatePreferredProvider(_ providerType: TTSProviderType) {
+        preferredProviderType = providerType
+    }
+
+    func speak(_ text: String) {
+        let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleanText.isEmpty == false else {
+            onSpeechFinished?()
+            return
+        }
+
+        stopSpeaking()
+        pendingFallbackText = cleanText
+
+        switch preferredProviderType {
+        case .piper:
+            if piperProvider.isAvailable {
+                activeProvider = piperProvider
+                piperProvider.speak(cleanText)
+            } else {
+                print("Axium Piper TTS unavailable. Falling back to Apple TTS.")
+                speakWithAppleFallback(cleanText)
+            }
+        case .apple:
+            speakWithAppleFallback(cleanText)
+        case .futureCloud:
+            print("Axium cloud TTS provider is not connected yet. Falling back to Apple TTS.")
+            speakWithAppleFallback(cleanText)
+        }
+    }
+
+    func stopSpeaking() {
+        activeProvider?.stopSpeaking()
+        appleProvider.stopSpeaking()
+        piperProvider.stopSpeaking()
+        isSpeaking = false
+    }
+
+    private func speakWithAppleFallback(_ text: String) {
+        activeProvider = appleProvider
+        appleProvider.speak(text)
+    }
+
+    private func configureProviderCallbacks() {
+        appleProvider.onSpeechStarted = { [weak self] in
+            self?.handleSpeechStarted()
+        }
+        appleProvider.onSpeechFinished = { [weak self] in
+            self?.handleSpeechFinished()
+        }
+        appleProvider.onSpeechCancelled = { [weak self] in
+            self?.handleSpeechCancelled()
+        }
+
+        piperProvider.onSpeechStarted = { [weak self] in
+            self?.handleSpeechStarted()
+        }
+        piperProvider.onSpeechFinished = { [weak self] in
+            self?.handleSpeechFinished()
+        }
+        piperProvider.onSpeechCancelled = { [weak self] in
+            self?.handleSpeechCancelled()
+        }
+        piperProvider.onSpeechFailed = { [weak self] message in
+            guard let self else { return }
+            print("Axium Piper TTS failed: \(message). Falling back to Apple TTS.")
+            self.speakWithAppleFallback(self.pendingFallbackText)
+        }
+    }
+
+    private func handleSpeechStarted() {
+        isSpeaking = true
+        onSpeechStarted?()
+    }
+
+    private func handleSpeechFinished() {
+        isSpeaking = false
+        onSpeechFinished?()
+    }
+
+    private func handleSpeechCancelled() {
+        isSpeaking = false
+        onSpeechCancelled?()
     }
 }

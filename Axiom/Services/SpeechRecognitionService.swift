@@ -57,7 +57,12 @@ final class AppleSpeechRecognitionProvider: NSObject, ObservableObject, SpeechRe
     private var utteranceStartedAt: Date?
     private var activeRecognitionID: UUID?
 
-    init(endpointing: EndpointingConfiguration = EndpointingConfiguration()) {
+    override init() {
+        self.endpointing = EndpointingConfiguration()
+        super.init()
+    }
+
+    init(endpointing: EndpointingConfiguration) {
         self.endpointing = endpointing
         super.init()
     }

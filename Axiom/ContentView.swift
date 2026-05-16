@@ -77,18 +77,15 @@ struct ContentView: View {
                 }
             }
 
-            if appMode == .projectFocus && (voiceSessionManager.isActive || voiceSessionManager.state == .error) {
+            if appMode == .projectFocus {
                 VStack {
                     HStack {
                         Spacer()
                         VoiceStatusIndicatorView(
-                            state: voiceSessionManager.state,
-                            statusText: voiceSessionManager.statusText,
-                            transcript: voiceSessionManager.liveTranscript,
-                            isMuted: voiceSessionManager.isMuted,
+                            manager: voiceSessionManager,
                             onToggleMute: { voiceSessionManager.toggleMute() },
                             onStop: { voiceSessionManager.stopSession() },
-                            onRestart: { voiceSessionManager.restartListening() }
+                            onRestart: { restartVoiceListening() }
                         )
                         .padding(.top, 24)
                         .padding(.trailing, 28)
@@ -157,7 +154,7 @@ struct ContentView: View {
 
     private func startVoiceSessionIfNeeded() {
         guard voiceSessionManager.isActive == false else {
-            voiceSessionManager.restartListening()
+            voiceSessionManager.restartListening(manualActivation: true)
             return
         }
 
@@ -165,6 +162,19 @@ struct ContentView: View {
             await voiceSessionManager.startSession { transcript in
                 Task { await handleVoiceTranscript(transcript) }
             }
+        }
+    }
+
+    private func restartVoiceListening() {
+        if voiceSessionManager.isActive {
+            voiceSessionManager.restartListening(manualActivation: true)
+            return
+        }
+
+        Task {
+            await voiceSessionManager.startSession(onFinalTranscript: { transcript in
+                Task { await handleVoiceTranscript(transcript) }
+            }, manualActivation: true)
         }
     }
 
@@ -1408,28 +1418,35 @@ struct CommandInputView: View {
 }
 
 struct VoiceStatusIndicatorView: View {
-    let state: VoiceSessionState
-    let statusText: String
-    let transcript: String
-    let isMuted: Bool
+    @ObservedObject var manager: VoiceSessionManager
     let onToggleMute: () -> Void
     let onStop: () -> Void
     let onRestart: () -> Void
 
+    @State private var isExpanded = false
+
     var body: some View {
         VStack(alignment: .trailing, spacing: 8) {
             HStack(spacing: 8) {
-                Label(statusText, systemImage: systemImage)
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundStyle(foregroundColor)
+                Button {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.86)) {
+                        isExpanded.toggle()
+                    }
+                } label: {
+                    Label(manager.statusText, systemImage: systemImage)
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundStyle(foregroundColor)
+                }
+                .buttonStyle(.plain)
+                .help("Voice controls")
 
                 Button(action: onToggleMute) {
-                    Image(systemName: isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                    Image(systemName: manager.isMuted ? "mic.slash.fill" : "mic.fill")
                         .font(.system(size: 11, weight: .semibold))
                         .frame(width: 24, height: 24)
                 }
                 .buttonStyle(.plain)
-                .help(isMuted ? "Unmute voice session" : "Mute voice session")
+                .help(manager.isMuted ? "Unmute voice session" : "Mute voice session")
 
                 Button(action: onRestart) {
                     Image(systemName: "arrow.clockwise")
@@ -1446,15 +1463,29 @@ struct VoiceStatusIndicatorView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Stop listening")
+
+                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(AxiomColor.textMuted)
+                    .frame(width: 18, height: 18)
             }
 
-            if transcript.isEmpty == false {
-                Text(transcript)
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
+            if manager.settings.showsLiveTranscript && manager.liveTranscript.isEmpty == false {
+                Text(manager.liveTranscript)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
                     .foregroundStyle(AxiomColor.textSecondary)
                     .lineLimit(2)
                     .multilineTextAlignment(.trailing)
                     .frame(maxWidth: 360, alignment: .trailing)
+            }
+
+            if isExpanded {
+                VoiceControlPanelView(
+                    manager: manager,
+                    onRestart: onRestart,
+                    onStop: onStop
+                )
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
         .padding(.horizontal, 12)
@@ -1472,7 +1503,11 @@ struct VoiceStatusIndicatorView: View {
     }
 
     private var systemImage: String {
-        switch state {
+        if manager.isMuted {
+            return "mic.slash"
+        }
+
+        switch manager.state {
         case .inactive:
             return "mic.slash"
         case .requestingPermission:
@@ -1493,7 +1528,11 @@ struct VoiceStatusIndicatorView: View {
     }
 
     private var foregroundColor: Color {
-        switch state {
+        if manager.isMuted {
+            return AxiomColor.textMuted
+        }
+
+        switch manager.state {
         case .error:
             return .orange
         case .listening, .transcribing, .speaking:
@@ -1504,7 +1543,7 @@ struct VoiceStatusIndicatorView: View {
     }
 
     private var borderColor: Color {
-        switch state {
+        switch manager.state {
         case .error:
             return .orange.opacity(0.28)
         case .listening, .transcribing, .speaking:
@@ -1512,6 +1551,197 @@ struct VoiceStatusIndicatorView: View {
         case .inactive, .requestingPermission, .thinking, .interrupted:
             return .white.opacity(0.09)
         }
+    }
+}
+
+struct VoiceControlPanelView: View {
+    @ObservedObject var manager: VoiceSessionManager
+    let onRestart: () -> Void
+    let onStop: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Voice Mode")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(AxiomColor.textMuted)
+
+                Picker("Voice Mode", selection: modeBinding) {
+                    ForEach(VoiceMode.allCases) { mode in
+                        Text(mode.displayName).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+
+            VStack(spacing: 9) {
+                VoiceToggleRow(
+                    title: "Interruption",
+                    subtitle: "Headphones recommended for interruption mode.",
+                    isOn: Binding(
+                        get: { manager.settings.isInterruptionEnabled },
+                        set: { newValue in
+                            Task { @MainActor in
+                                manager.setInterruptionEnabled(newValue)
+                            }
+                        }
+                    )
+                )
+
+                VoiceToggleRow(
+                    title: "Live Transcript",
+                    subtitle: "Show recognized speech as you talk.",
+                    isOn: Binding(
+                        get: { manager.settings.showsLiveTranscript },
+                        set: { newValue in
+                            Task { @MainActor in
+                                manager.setLiveTranscriptVisible(newValue)
+                            }
+                        }
+                    )
+                )
+
+                VoiceToggleRow(
+                    title: "Auto Speak",
+                    subtitle: "Speak Axium responses aloud.",
+                    isOn: Binding(
+                        get: { manager.settings.autoSpeaksResponses },
+                        set: { newValue in
+                            Task { @MainActor in
+                                manager.setAutoSpeakResponses(newValue)
+                            }
+                        }
+                    )
+                )
+
+                VoiceToggleRow(
+                    title: "Mute Speech",
+                    subtitle: "Keep listening, but do not speak aloud.",
+                    isOn: Binding(
+                        get: { manager.settings.isSpeechOutputMuted },
+                        set: { newValue in
+                            Task { @MainActor in
+                                manager.setSpeechOutputMuted(newValue)
+                            }
+                        }
+                    )
+                )
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Sensitivity")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(AxiomColor.textMuted)
+
+                Picker("Sensitivity", selection: sensitivityBinding) {
+                    ForEach(VoiceSensitivity.allCases) { sensitivity in
+                        Text(sensitivity.displayName).tag(sensitivity)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Voice Engine")
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundStyle(AxiomColor.textMuted)
+
+                Picker("Voice Engine", selection: ttsProviderBinding) {
+                    ForEach(TTSProviderType.allCases) { provider in
+                        Text(provider.displayName).tag(provider)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }
+
+            HStack(spacing: 8) {
+                Button(action: onRestart) {
+                    Label("Restart", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.plain)
+
+                Button(action: onStop) {
+                    Label("Stop", systemImage: "stop.fill")
+                }
+                .buttonStyle(.plain)
+
+                Spacer(minLength: 0)
+            }
+            .font(.system(size: 12, weight: .semibold, design: .rounded))
+            .foregroundStyle(AxiomColor.textSecondary)
+
+            Text("Wake phrase detection, realtime WhisperKit, advanced VAD, echo cancellation, AirPods optimization, and streaming cloud voice will plug into this panel later.")
+                .font(.system(size: 10, weight: .medium, design: .rounded))
+                .foregroundStyle(AxiomColor.textMuted.opacity(0.86))
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(width: 340)
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(AxiomColor.cardSurface.opacity(0.94))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(.white.opacity(0.08), lineWidth: 1)
+                )
+        )
+    }
+
+    private var modeBinding: Binding<VoiceMode> {
+        Binding(
+            get: { manager.settings.selectedMode },
+            set: { newValue in
+                Task { @MainActor in
+                    manager.updateMode(newValue)
+                }
+            }
+        )
+    }
+
+    private var sensitivityBinding: Binding<VoiceSensitivity> {
+        Binding(
+            get: { manager.settings.sensitivity },
+            set: { newValue in
+                Task { @MainActor in
+                    manager.updateSensitivity(newValue)
+                }
+            }
+        )
+    }
+
+    private var ttsProviderBinding: Binding<TTSProviderType> {
+        Binding(
+            get: { manager.settings.ttsProviderType },
+            set: { newValue in
+                Task { @MainActor in
+                    manager.updateTTSProviderType(newValue)
+                }
+            }
+        )
+    }
+}
+
+struct VoiceToggleRow: View {
+    let title: String
+    let subtitle: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        Toggle(isOn: $isOn) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(AxiomColor.textPrimary)
+
+                Text(subtitle)
+                    .font(.system(size: 10, weight: .medium, design: .rounded))
+                    .foregroundStyle(AxiomColor.textMuted)
+            }
+        }
+        .toggleStyle(.switch)
     }
 }
 
