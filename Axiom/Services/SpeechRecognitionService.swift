@@ -11,8 +11,16 @@ import Foundation
 import Speech
 
 @MainActor
-final class SpeechRecognitionService: NSObject, ObservableObject {
-    enum SpeechRecognitionServiceError: LocalizedError {
+final class AppleSpeechRecognitionProvider: NSObject, ObservableObject, SpeechRecognitionProvider {
+    struct EndpointingConfiguration: Equatable {
+        var minUtteranceLength: Int = 2
+        var silenceTimeout: TimeInterval = 1.7
+        var maxUtteranceDuration: TimeInterval = 28
+        var partialTranscriptDebounce: TimeInterval = 0.22
+        var incompletePhraseExtraDelay: TimeInterval = 0.85
+    }
+
+    enum AppleSpeechRecognitionProviderError: LocalizedError {
         case microphoneDenied
         case speechRecognitionDenied
         case recognizerUnavailable
@@ -36,13 +44,23 @@ final class SpeechRecognitionService: NSObject, ObservableObject {
     var onFinalTranscript: ((String) -> Void)?
     var onError: ((String) -> Void)?
 
+    private let endpointing: EndpointingConfiguration
     private let speechRecognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     private let audioEngine = AVAudioEngine()
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
-    private var silenceWorkItem: DispatchWorkItem?
+    private var endpointTask: Task<Void, Never>?
     private var latestTranscript = ""
+    private var lastEmittedPartialTranscript = ""
+    private var lastPartialEmitAt: Date?
+    private var lastTranscriptUpdateAt: Date?
+    private var utteranceStartedAt: Date?
     private var activeRecognitionID: UUID?
+
+    init(endpointing: EndpointingConfiguration = EndpointingConfiguration()) {
+        self.endpointing = endpointing
+        super.init()
+    }
 
     var isAvailable: Bool {
         speechRecognizer?.isAvailable == true
@@ -51,26 +69,30 @@ final class SpeechRecognitionService: NSObject, ObservableObject {
     func requestPermissions() async throws {
         let speechStatus = await requestSpeechAuthorization()
         guard speechStatus == .authorized else {
-            throw SpeechRecognitionServiceError.speechRecognitionDenied
+            throw AppleSpeechRecognitionProviderError.speechRecognitionDenied
         }
 
         let microphoneAllowed = await requestMicrophoneAuthorization()
         guard microphoneAllowed else {
-            throw SpeechRecognitionServiceError.microphoneDenied
+            throw AppleSpeechRecognitionProviderError.microphoneDenied
         }
 
         guard isAvailable else {
-            throw SpeechRecognitionServiceError.recognizerUnavailable
+            throw AppleSpeechRecognitionProviderError.recognizerUnavailable
         }
     }
 
     func startListening() throws {
         guard isAvailable else {
-            throw SpeechRecognitionServiceError.recognizerUnavailable
+            throw AppleSpeechRecognitionProviderError.recognizerUnavailable
         }
 
         stopListening()
         latestTranscript = ""
+        lastEmittedPartialTranscript = ""
+        lastPartialEmitAt = nil
+        lastTranscriptUpdateAt = nil
+        utteranceStartedAt = Date()
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
@@ -81,7 +103,7 @@ final class SpeechRecognitionService: NSObject, ObservableObject {
         let inputNode = audioEngine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
         guard format.channelCount > 0 else {
-            throw SpeechRecognitionServiceError.audioInputUnavailable
+            throw AppleSpeechRecognitionProviderError.audioInputUnavailable
         }
 
         inputNode.removeTap(onBus: 0)
@@ -110,8 +132,8 @@ final class SpeechRecognitionService: NSObject, ObservableObject {
     }
 
     func stopListening() {
-        silenceWorkItem?.cancel()
-        silenceWorkItem = nil
+        endpointTask?.cancel()
+        endpointTask = nil
 
         if audioEngine.isRunning {
             audioEngine.stop()
@@ -123,33 +145,104 @@ final class SpeechRecognitionService: NSObject, ObservableObject {
         recognitionTask = nil
         recognitionRequest = nil
         activeRecognitionID = nil
+        lastTranscriptUpdateAt = nil
+        utteranceStartedAt = nil
     }
 
     private func handleRecognitionResult(_ result: SFSpeechRecognitionResult) {
         let transcript = result.bestTranscription.formattedString.trimmingCharacters(in: .whitespacesAndNewlines)
         guard transcript.isEmpty == false else { return }
 
+        let transcriptChanged = transcript.caseInsensitiveCompare(latestTranscript) != .orderedSame
         latestTranscript = transcript
-        onPartialTranscript?(transcript)
 
-        silenceWorkItem?.cancel()
-        let delay: TimeInterval = result.isFinal ? 0.15 : 1.05
-        let workItem = DispatchWorkItem { [weak self] in
-            Task { @MainActor in
-                self?.submitLatestTranscript()
-            }
+        if transcriptChanged {
+            lastTranscriptUpdateAt = Date()
+            emitPartialTranscriptIfNeeded(transcript)
         }
-        silenceWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+
+        scheduleEndpointCheck()
     }
 
     private func submitLatestTranscript() {
         let transcript = latestTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard transcript.isEmpty == false else { return }
+
+        guard transcript.count >= endpointing.minUtteranceLength else {
+            scheduleEndpointCheck(extraDelay: endpointing.incompletePhraseExtraDelay)
+            return
+        }
+
+        let now = Date()
+        let stableFor = now.timeIntervalSince(lastTranscriptUpdateAt ?? now)
+        let utteranceDuration = now.timeIntervalSince(utteranceStartedAt ?? now)
+        let hitMaxDuration = utteranceDuration >= endpointing.maxUtteranceDuration
+
+        if stableFor < endpointing.silenceTimeout, hitMaxDuration == false {
+            scheduleEndpointCheck(extraDelay: endpointing.silenceTimeout - stableFor)
+            return
+        }
+
+        if seemsSemanticallyIncomplete(transcript), hitMaxDuration == false {
+            scheduleEndpointCheck(extraDelay: endpointing.incompletePhraseExtraDelay)
+            return
+        }
+
         latestTranscript = ""
-        silenceWorkItem?.cancel()
-        silenceWorkItem = nil
+        endpointTask?.cancel()
+        endpointTask = nil
         onFinalTranscript?(transcript)
+    }
+
+    private func emitPartialTranscriptIfNeeded(_ transcript: String) {
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastPartialEmitAt ?? .distantPast)
+        guard transcript.caseInsensitiveCompare(lastEmittedPartialTranscript) != .orderedSame,
+              elapsed >= endpointing.partialTranscriptDebounce
+        else { return }
+
+        lastEmittedPartialTranscript = transcript
+        lastPartialEmitAt = now
+        onPartialTranscript?(transcript)
+    }
+
+    private func scheduleEndpointCheck(extraDelay: TimeInterval? = nil) {
+        endpointTask?.cancel()
+        let delay = max(0.05, extraDelay ?? endpointing.silenceTimeout)
+        endpointTask = Task { [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            } catch {
+                return
+            }
+
+            await MainActor.run {
+                self?.submitLatestTranscript()
+            }
+        }
+    }
+
+    private func seemsSemanticallyIncomplete(_ transcript: String) -> Bool {
+        let normalized = transcript
+            .lowercased()
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+
+        let incompleteEndings = [
+            "and",
+            "or",
+            "but",
+            "because",
+            "so",
+            "then",
+            "like",
+            "i want to",
+            "can you",
+            "what about"
+        ]
+
+        return incompleteEndings.contains { ending in
+            normalized == ending || normalized.hasSuffix(" \(ending)")
+        }
     }
 
     private func requestSpeechAuthorization() async -> SFSpeechRecognizerAuthorizationStatus {
@@ -168,3 +261,5 @@ final class SpeechRecognitionService: NSObject, ObservableObject {
         }
     }
 }
+
+typealias SpeechRecognitionService = AppleSpeechRecognitionProvider

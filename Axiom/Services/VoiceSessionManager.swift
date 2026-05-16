@@ -26,7 +26,7 @@ final class VoiceSessionManager: ObservableObject {
     @Published private(set) var errorMessage: String?
     @Published var isMuted = false
 
-    private let speechRecognitionService: SpeechRecognitionService
+    private let speechRecognitionProvider: any SpeechRecognitionProvider
     private let speechSynthesisService: SpeechSynthesisService
     private var onFinalTranscript: ((String) -> Void)?
     private var lastSpokenText = ""
@@ -35,16 +35,16 @@ final class VoiceSessionManager: ObservableObject {
     private var isHandlingBargeIn = false
 
     init() {
-        self.speechRecognitionService = SpeechRecognitionService()
+        self.speechRecognitionProvider = AppleSpeechRecognitionProvider()
         self.speechSynthesisService = SpeechSynthesisService()
         configureCallbacks()
     }
 
     init(
-        speechRecognitionService: SpeechRecognitionService,
+        speechRecognitionProvider: any SpeechRecognitionProvider,
         speechSynthesisService: SpeechSynthesisService
     ) {
-        self.speechRecognitionService = speechRecognitionService
+        self.speechRecognitionProvider = speechRecognitionProvider
         self.speechSynthesisService = speechSynthesisService
         configureCallbacks()
     }
@@ -84,7 +84,7 @@ final class VoiceSessionManager: ObservableObject {
         state = .requestingPermission
 
         do {
-            try await speechRecognitionService.requestPermissions()
+            try await speechRecognitionProvider.requestPermissions()
             try startListening()
         } catch {
             state = .error
@@ -99,7 +99,7 @@ final class VoiceSessionManager: ObservableObject {
         lastSpokenText = ""
         lastSubmittedTranscript = ""
         speechSynthesisService.stopSpeaking()
-        speechRecognitionService.stopListening()
+        speechRecognitionProvider.stopListening()
         state = .inactive
     }
 
@@ -118,7 +118,7 @@ final class VoiceSessionManager: ObservableObject {
         isMuted.toggle()
         if isMuted {
             speechSynthesisService.stopSpeaking()
-            speechRecognitionService.stopListening()
+            speechRecognitionProvider.stopListening()
             state = .inactive
         } else if isSessionActive {
             restartListening()
@@ -154,15 +154,15 @@ final class VoiceSessionManager: ObservableObject {
     }
 
     private func configureCallbacks() {
-        speechRecognitionService.onPartialTranscript = { [weak self] transcript in
+        speechRecognitionProvider.onPartialTranscript = { [weak self] transcript in
             self?.handlePartialTranscript(transcript)
         }
 
-        speechRecognitionService.onFinalTranscript = { [weak self] transcript in
+        speechRecognitionProvider.onFinalTranscript = { [weak self] transcript in
             self?.handleFinalTranscript(transcript)
         }
 
-        speechRecognitionService.onError = { [weak self] message in
+        speechRecognitionProvider.onError = { [weak self] message in
             guard let self, self.isSessionActive else { return }
             self.state = .error
             self.errorMessage = message
@@ -185,7 +185,7 @@ final class VoiceSessionManager: ObservableObject {
     }
 
     private func startListening(setState: Bool = true) throws {
-        try speechRecognitionService.startListening()
+        try speechRecognitionProvider.startListening()
         if setState {
             liveTranscript = ""
             state = .listening
@@ -226,7 +226,7 @@ final class VoiceSessionManager: ObservableObject {
 
         lastSubmittedTranscript = cleanTranscript
         liveTranscript = cleanTranscript
-        speechRecognitionService.stopListening()
+        speechRecognitionProvider.stopListening()
         speechSynthesisService.stopSpeaking()
         state = .thinking
         onFinalTranscript?(cleanTranscript)
