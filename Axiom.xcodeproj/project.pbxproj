@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		42A100012FB8000000000001 /* Orb in Frameworks */ = {isa = PBXBuildFile; productRef = 42A100032FB8000000000001 /* Orb */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		4281E1D12FB673650028D410 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -52,6 +56,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				42A100012FB8000000000001 /* Orb in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -112,6 +117,7 @@
 			);
 			name = Axiom;
 			packageProductDependencies = (
+				42A100032FB8000000000001 /* Orb */,
 			);
 			productName = Axiom;
 			productReference = 4281E1BE2FB673630028D410 /* Axiom.app */;
@@ -195,6 +201,9 @@
 			);
 			mainGroup = 4281E1B52FB673630028D410;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				42A100022FB8000000000001 /* XCLocalSwiftPackageReference "Packages/Orb" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 4281E1BF2FB673630028D410 /* Products */;
 			projectDirPath = "";
@@ -395,10 +404,12 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				ENABLE_APP_SANDBOX = YES;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Axium;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -425,10 +436,12 @@
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				ENABLE_APP_SANDBOX = YES;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_OUTGOING_NETWORK_CONNECTIONS = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = Axium;
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -563,6 +576,21 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		42A100022FB8000000000001 /* XCLocalSwiftPackageReference "Packages/Orb" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/Orb;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		42A100032FB8000000000001 /* Orb */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 42A100022FB8000000000001 /* XCLocalSwiftPackageReference "Packages/Orb" */;
+			productName = Orb;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 4281E1B62FB673630028D410 /* Project object */;
 }
